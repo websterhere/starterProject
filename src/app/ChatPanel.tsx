@@ -27,11 +27,11 @@ interface Invoice {
 }
 
 interface ChatPanelProps {
-  onInvoiceResult?: (invoice: Invoice) => void;
+  onInvoices?: (invoices: Invoice[]) => void;
   invoices?: Invoice[];
 }
 
-const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoiceResult, invoices = [] }) => {
+const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoices }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -61,6 +61,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoiceResult, invoices = [] })
       const decoder = new TextDecoder();
       let assistantMsg = '';
       let toolResultHandled = false;
+      let toolWasUsed = false;
       let done = false;
 
       while (!done) {
@@ -82,62 +83,86 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoiceResult, invoices = [] })
                   const parsed = JSON.parse(possibleJson);
                   const maybeInvoice = parsed.result || parsed;
 
+                  // If the tool result is an array of invoices, notify parent
+                  if (Array.isArray(maybeInvoice) && maybeInvoice.length && maybeInvoice[0].DocNumber) {
+                    if (onInvoices) onInvoices(maybeInvoice);
+                    toolResultHandled = true;
+                    toolWasUsed = true;
+                    setMessages((msgs) => [
+                      ...msgs,
+                      {
+                        role: 'assistant',
+                        content: `✅ Tool was called successfully: *Get Invoices by Customer*\n\nCustomer invoices are shown in the left panel.`,
+                      },
+                    ]);
+                    return;
+                  }
+
+                  // If the tool result is a single invoice, notify parent
                   if (
                     maybeInvoice &&
                     (maybeInvoice.Id || maybeInvoice.DocNumber) &&
                     maybeInvoice.TotalAmt !== undefined
                   ) {
-                    if (onInvoiceResult && !toolResultHandled) {
-                      onInvoiceResult(maybeInvoice);
+                    toolWasUsed = true;
+                    if (onInvoices && !toolResultHandled) {
+                      onInvoices([maybeInvoice]);
                       toolResultHandled = true;
+                      setMessages((msgs) => [
+                        ...msgs,
+                        {
+                          role: 'assistant',
+                          content: `✅ Tool was called successfully: *Invoice Extractor*\n\nInvoice Details:\nID: ${maybeInvoice.Id}\nDocument Number: ${maybeInvoice.DocNumber}\nCustomer: ${maybeInvoice.CustomerRef?.name}\nTotal Amount: $${maybeInvoice.TotalAmt}\nBalance: $${maybeInvoice.Balance}`,
+                        },
+                      ]);
                     }
-                    return; // ✅ Don't show anything for tool call
+                    return;
                   }
                 } catch {
-                  // Skip invalid JSON
+                  // Not valid JSON, skip
                 }
               }
             }
           } catch (err) {
             console.log('Chunk parse failed, waiting for more data...', err);
           }
+        }
+      }
 
-          if (!toolResultHandled) {
-            const lines = assistantMsg.split('\n');
-            const humanLines = lines.filter((line) => {
-              const trimmed = line.trim();
-
-              const isNoise = 
-                trimmed.startsWith('e:{') || 
-                trimmed.startsWith('d:{') ||
-                trimmed.includes('"promptTokens"') ||
-                trimmed.includes('"completionTokens"') ||
-                trimmed.includes('"finishReason"') ||
-                trimmed.includes('"toolCallId"') ||
-                trimmed.includes('"toolName"') ||
-                /^[0-9]+:/.test(trimmed); // filters lines like 0: "Hi" 1: "there"
-
-              return trimmed && !isNoise;
-            });
-
-            const cleanOutput = humanLines.join(' ').trim();
-
-            if (cleanOutput) {
-              setMessages((msgs) => [
-                ...msgs.filter((m, i) => i !== msgs.length - 1 || m.role !== 'assistant'),
-                { role: 'assistant', content: cleanOutput },
-              ]);
-            }
-
-          }
-          
+      if (!toolResultHandled) {
+        // Check if the input contains an invoice number pattern
+        const invoiceNumberMatch = input.match(/invoice\s+(\d+)/i);
+        if (invoiceNumberMatch) {
+          setMessages((msgs) => [
+            ...msgs,
+            {
+              role: 'assistant',
+              content: `❌ Invoice ${invoiceNumberMatch[1]} was not found. Please check the invoice number and try again.`,
+            },
+          ]);
+        } else if (toolWasUsed) {
+          setMessages((msgs) => [
+            ...msgs,
+            {
+              role: 'assistant',
+              content: 'ℹ️ The tool was used, but no matching invoice was found. Please check the invoice number and try again.',
+            },
+          ]);
+        } else {
+          setMessages((msgs) => [
+            ...msgs,
+            {
+              role: 'assistant',
+              content: 'Either the tool was not used, or the tool was used but there was some issue with the tool call.',
+            },
+          ]);
         }
       }
     } catch (err) {
       console.error('Error in chat:', err);
       setMessages((msgs) => [
         ...msgs,
-        { role: 'assistant', content: 'Error: Could not get response.' },
+        { role: 'assistant', content: '❌ Error: Could not get response.' },
       ]);
     } finally {
       setLoading(false);
@@ -148,7 +173,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoiceResult, invoices = [] })
   };
 
   return (
-    <div className="bg-white shadow rounded-lg border border-gray-200 flex flex-col h-[500px] max-h-[80vh]">
+    <div className="flex-1 flex flex-col">
       <div className="p-4 border-b font-semibold text-lg text-gray-700">Invoice Chat Assistant</div>
       <div className="flex-1 overflow-y-auto p-4 space-y-2 text-sm">
         {messages.length === 0 && (

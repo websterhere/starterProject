@@ -74,7 +74,7 @@ export default function HomePage() {
         } else {
           setIsAuthenticated(false);
         }
-      } catch (err) {
+      } catch {
         setIsAuthenticated(false);
       }
     };
@@ -204,14 +204,8 @@ export default function HomePage() {
           )}
         </div>
         {/* Chat Panel */}
-        <div className="w-full md:w-[400px] max-w-full flex flex-col">
-          <ChatPanel
-            invoices={invoices}
-            onInvoiceResult={(invoice: Invoice) => {
-              console.log('Received invoice from tool:', invoice);
-              setInvoices([invoice]);
-            }}
-          />
+        <div className="w-[420px] min-w-[320px] max-w-[100vw]">
+          <ChatPanel onInvoices={setInvoices} />
         </div>
       </div>
     </main>
