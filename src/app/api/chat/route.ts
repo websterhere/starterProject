@@ -1,7 +1,7 @@
 // app/api/chat/route.ts
 import { streamText } from 'ai';
 import { openai } from '@ai-sdk/openai';
-import { getInvoiceByIdFromApi, getTop5InvoicesFromApi, getInvoicesByCustomerNameFromApi } from '@/lib/tools/quickbooksTools';
+import { getInvoiceByIdFromApi, getTop5InvoicesFromApi, getInvoicesByCustomerNameFromApi, sendInvoicePdfFromApi } from '@/lib/tools/quickbooksTools';
 
 export const runtime = 'edge';
 
@@ -11,7 +11,7 @@ export async function POST(req: Request) {
   const result = await streamText({
     model: openai('gpt-4'),
     messages,
-    tools: { getInvoiceByIdFromApi, getTop5InvoicesFromApi, getInvoicesByCustomerNameFromApi },
+    tools: { getInvoiceByIdFromApi, getTop5InvoicesFromApi, getInvoicesByCustomerNameFromApi, sendInvoicePdfFromApi },
     toolChoice: 'auto',
   });
 

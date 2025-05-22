@@ -113,3 +113,45 @@ export const getInvoicesByCustomerNameFromApi = tool({
     return await res.json();
   },
 });
+
+export const sendInvoicePdfFromApi = tool({
+  description: 'Sends the PDF of a QuickBooks invoice to a specified email address.',
+  parameters: z.object({
+    id: z.string().describe('The ID of the invoice to email'),
+    sendTo: z.string().email().describe('The email address to send the invoice PDF to'),
+  }),
+  async execute({ id, sendTo }) {
+    const baseUrl = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000';
+    const cookieStore = await cookies();
+    const accessToken = cookieStore.get('qbo_access_token')?.value;
+    const refreshToken = cookieStore.get('qbo_refresh_token')?.value;
+    const realmId = cookieStore.get('qbo_realm_id')?.value;
+
+    if (!accessToken || !refreshToken || !realmId) {
+      return {
+        error: 'Missing QuickBooks credentials',
+        details: {
+          hasAccessToken: !!accessToken,
+          hasRefreshToken: !!refreshToken,
+          hasRealmId: !!realmId
+        }
+      };
+    }
+
+    const res = await fetch(`${baseUrl}/api/quickbooks/invoices/email`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-qbo-access-token': accessToken,
+        'x-qbo-refresh-token': refreshToken,
+        'x-qbo-realm-id': realmId,
+      },
+      body: JSON.stringify({ id, sendTo })
+    });
+    if (!res.ok) {
+      const errorText = await res.text();
+      return { error: `Failed to email invoice PDF: ${res.statusText}`, status: res.status, body: errorText };
+    }
+    return await res.json();
+  },
+});
