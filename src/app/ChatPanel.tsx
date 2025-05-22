@@ -3,7 +3,7 @@ import React, { useState, useRef } from 'react';
 interface Message {
   role: 'user' | 'assistant';
   content: string;
-  streaming?: boolean; // Indicates if this message is still streaming
+  streaming?: boolean;
 }
 
 interface Invoice {
@@ -38,14 +38,12 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoices }) => {
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Helper to scroll to bottom
   const scrollToBottom = () => {
     setTimeout(() => {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, 100);
   };
 
-  // Helper to stream a message character by character
   const streamMessage = (msg: string) => {
     setMessages((msgs) => [
       ...msgs,
@@ -85,12 +83,6 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoices }) => {
     setInput('');
     setLoading(true);
 
-    // Add a placeholder for the streaming assistant message
-    setMessages((msgs) => [
-      ...msgs,
-      { role: 'assistant', content: '', streaming: true }
-    ]);
-
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -104,92 +96,39 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoices }) => {
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let assistantMsg = '';
-      let toolResultHandled = false;
       let toolWasUsed = false;
-      let done = false;
-
-      // For tool result handling
+      let toolResultHandled = false;
       let toolResultBuffer = '';
 
-      // Streaming logic: only show plain text, never show JSON
-      while (!done) {
-        const { value, done: doneReading } = await reader.read();
-        done = doneReading;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
 
         if (value) {
           const chunk = decoder.decode(value);
+          toolResultBuffer += chunk;
 
-          // Filter out any JSON-looking content from the chunk
-          // Remove any lines that look like JSON objects or arrays
-          const filteredChunk = chunk
-            .split('\n')
-            .filter(line => {
-              // Remove lines that look like JSON objects or arrays
-              const trimmed = line.trim();
-              // Remove if line starts with { or [ or looks like JSON
-              if (
-                trimmed.startsWith('{') ||
-                trimmed.startsWith('[') ||
-                trimmed.endsWith('}') ||
-                trimmed.endsWith(']') ||
-                trimmed.match(/^".*":/) // key: value
-              ) {
-                return false;
-              }
-              // Remove if line is a valid JSON object
-              try {
-                const maybeJson = JSON.parse(trimmed);
-                if (typeof maybeJson === 'object') return false;
-              } catch {
-                // not JSON, keep
-              }
-              return true;
-            })
-            .join('\n');
-
-          assistantMsg += filteredChunk;
-
-          // Update the streaming assistant message in the UI
-          setMessages((msgs) => {
-            // Find the last assistant message with streaming: true
-            const idx = msgs.findIndex(
-              (m, i) => m.role === 'assistant' && m.streaming && i === msgs.length - 1
-            );
-            if (idx !== -1) {
-              const updated = [...msgs];
-              updated[idx] = { ...updated[idx], content: assistantMsg, streaming: true };
-              return updated;
-            }
-            return msgs;
-          });
-          scrollToBottom();
-
-          // Try to parse tool result from the stream (but do not show JSON in UI)
           try {
-            toolResultBuffer += chunk;
-            // Try to find JSON in the buffer
             const lines = toolResultBuffer.split(/\n|(?<=})\s*(?=\w+:)/);
+            
             for (const line of lines) {
               const jsonStart = line.indexOf('{');
               const jsonEnd = line.lastIndexOf('}');
+              
               if (jsonStart !== -1 && jsonEnd > jsonStart) {
                 const possibleJson = line.slice(jsonStart, jsonEnd + 1);
                 try {
                   const parsed = JSON.parse(possibleJson);
                   const maybeInvoice = parsed.result || parsed;
 
-                  // If the tool result is an array of invoices, notify parent
                   if (Array.isArray(maybeInvoice) && maybeInvoice.length && maybeInvoice[0].DocNumber) {
                     if (onInvoices) onInvoices(maybeInvoice);
                     toolResultHandled = true;
                     toolWasUsed = true;
-                    // Stream the success message
-                    streamMessage(`✅ Tool was called successfully: *Get Invoices by Customer*\n\nCustomer invoices are shown in the left panel.`);
+                    streamMessage('Tool called');
                     return;
                   }
 
-                  // If the tool result is a single invoice, notify parent
                   if (
                     maybeInvoice &&
                     (maybeInvoice.Id || maybeInvoice.DocNumber) &&
@@ -199,9 +138,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoices }) => {
                     if (onInvoices && !toolResultHandled) {
                       onInvoices([maybeInvoice]);
                       toolResultHandled = true;
-                      streamMessage(
-                        `✅ Tool was called successfully: *Invoice Extractor*\n\nInvoice Details:\nID: ${maybeInvoice.Id}\nDocument Number: ${maybeInvoice.DocNumber}\nCustomer: ${maybeInvoice.CustomerRef?.name}\nTotal Amount: $${maybeInvoice.TotalAmt}\nBalance: $${maybeInvoice.Balance}`
-                      );
+                      streamMessage('Tool called');
                     }
                     return;
                   }
@@ -211,45 +148,20 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoices }) => {
               }
             }
           } catch {
-            // Ignore parse errors, wait for more data
+            // Ignore parse errors
           }
         }
       }
 
-      // When stream is done, finalize the streaming message
-      setMessages((msgs) => {
-        // Find the last assistant message with streaming: true
-        const idx = msgs.findIndex(
-          (m, i) => m.role === 'assistant' && m.streaming && i === msgs.length - 1
-        );
-        if (idx !== -1) {
-          const updated = [...msgs];
-          updated[idx] = { ...updated[idx], content: assistantMsg, streaming: false };
-          return updated;
-        }
-        return msgs;
-      });
-      scrollToBottom();
-
-      // If no tool result was handled, show fallback messages as a stream
       if (!toolResultHandled) {
-        // Check if the input contains an invoice number pattern
-        const invoiceNumberMatch = input.match(/invoice\s+(\d+)/i);
-        if (invoiceNumberMatch) {
-          streamMessage(`❌ Invoice ${invoiceNumberMatch[1]} was not found. Please check the invoice number and try again.`);
-        } else if (toolWasUsed) {
-          streamMessage('ℹ️ The tool was used, but no matching invoice was found. Please check the invoice number and try again.');
-        } else {
-          streamMessage('Either the tool was not used, or the tool was used but there was some issue with the tool call.');
-        }
-        scrollToBottom();
+        streamMessage('Either tool was called and there was an error or not called');
       }
     } catch (err) {
       console.error('Error in chat:', err);
-      streamMessage('❌ Error: Could not get response.');
-      scrollToBottom();
+      streamMessage('Either tool was called and there was an error or not called');
     } finally {
       setLoading(false);
+      scrollToBottom();
     }
   };
 
@@ -274,7 +186,6 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoices }) => {
               style={msg.streaming ? { opacity: 0.7, fontStyle: 'italic' } : {}}
             >
               {msg.content}
-              {/* Remove the cursor/pulse indicator */}
             </span>
           </div>
         ))}
