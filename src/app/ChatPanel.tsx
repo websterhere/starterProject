@@ -3,6 +3,7 @@ import React, { useState, useRef } from 'react';
 interface Message {
   role: 'user' | 'assistant';
   content: string;
+  streaming?: boolean; // Indicates if this message is still streaming
 }
 
 interface Invoice {
@@ -37,6 +38,44 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoices }) => {
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Helper to scroll to bottom
+  const scrollToBottom = () => {
+    setTimeout(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, 100);
+  };
+
+  // Helper to stream a message character by character
+  const streamMessage = (msg: string) => {
+    setMessages((msgs) => [
+      ...msgs,
+      { role: 'assistant', content: '', streaming: true }
+    ]);
+    let i = 0;
+    const stream = () => {
+      setMessages((msgs) => {
+        const idx = msgs.findIndex(
+          (m, idx) => m.role === 'assistant' && m.streaming && idx === msgs.length - 1
+        );
+        if (idx !== -1) {
+          const updated = [...msgs];
+          updated[idx] = {
+            ...updated[idx],
+            content: msg.slice(0, i),
+            streaming: i < msg.length,
+          };
+          return updated;
+        }
+        return msgs;
+      });
+      if (i < msg.length) {
+        i++;
+        setTimeout(stream, 10);
+      }
+    };
+    stream();
+  };
+
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim()) return;
@@ -45,6 +84,12 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoices }) => {
     setMessages(newMessages);
     setInput('');
     setLoading(true);
+
+    // Add a placeholder for the streaming assistant message
+    setMessages((msgs) => [
+      ...msgs,
+      { role: 'assistant', content: '', streaming: true }
+    ]);
 
     try {
       const res = await fetch('/api/chat', {
@@ -64,16 +109,67 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoices }) => {
       let toolWasUsed = false;
       let done = false;
 
+      // For tool result handling
+      let toolResultBuffer = '';
+
+      // Streaming logic: only show plain text, never show JSON
       while (!done) {
         const { value, done: doneReading } = await reader.read();
         done = doneReading;
 
         if (value) {
           const chunk = decoder.decode(value);
-          assistantMsg += chunk;
 
+          // Filter out any JSON-looking content from the chunk
+          // Remove any lines that look like JSON objects or arrays
+          const filteredChunk = chunk
+            .split('\n')
+            .filter(line => {
+              // Remove lines that look like JSON objects or arrays
+              const trimmed = line.trim();
+              // Remove if line starts with { or [ or looks like JSON
+              if (
+                trimmed.startsWith('{') ||
+                trimmed.startsWith('[') ||
+                trimmed.endsWith('}') ||
+                trimmed.endsWith(']') ||
+                trimmed.match(/^".*":/) // key: value
+              ) {
+                return false;
+              }
+              // Remove if line is a valid JSON object
+              try {
+                const maybeJson = JSON.parse(trimmed);
+                if (typeof maybeJson === 'object') return false;
+              } catch {
+                // not JSON, keep
+              }
+              return true;
+            })
+            .join('\n');
+
+          assistantMsg += filteredChunk;
+
+          // Update the streaming assistant message in the UI
+          setMessages((msgs) => {
+            // Find the last assistant message with streaming: true
+            const idx = msgs.findIndex(
+              (m, i) => m.role === 'assistant' && m.streaming && i === msgs.length - 1
+            );
+            if (idx !== -1) {
+              const updated = [...msgs];
+              updated[idx] = { ...updated[idx], content: assistantMsg, streaming: true };
+              return updated;
+            }
+            return msgs;
+          });
+          scrollToBottom();
+
+          // Try to parse tool result from the stream (but do not show JSON in UI)
           try {
-            const lines = assistantMsg.split(/\n|(?<=})\s*(?=\w+:)/);
+            toolResultBuffer += chunk;
+            // Try to find JSON in the buffer
+            const lines = toolResultBuffer.split(/\n|(?<=})\s*(?=\w+:)/);
             for (const line of lines) {
               const jsonStart = line.indexOf('{');
               const jsonEnd = line.lastIndexOf('}');
@@ -88,13 +184,8 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoices }) => {
                     if (onInvoices) onInvoices(maybeInvoice);
                     toolResultHandled = true;
                     toolWasUsed = true;
-                    setMessages((msgs) => [
-                      ...msgs,
-                      {
-                        role: 'assistant',
-                        content: `✅ Tool was called successfully: *Get Invoices by Customer*\n\nCustomer invoices are shown in the left panel.`,
-                      },
-                    ]);
+                    // Stream the success message
+                    streamMessage(`✅ Tool was called successfully: *Get Invoices by Customer*\n\nCustomer invoices are shown in the left panel.`);
                     return;
                   }
 
@@ -108,13 +199,9 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoices }) => {
                     if (onInvoices && !toolResultHandled) {
                       onInvoices([maybeInvoice]);
                       toolResultHandled = true;
-                      setMessages((msgs) => [
-                        ...msgs,
-                        {
-                          role: 'assistant',
-                          content: `✅ Tool was called successfully: *Invoice Extractor*\n\nInvoice Details:\nID: ${maybeInvoice.Id}\nDocument Number: ${maybeInvoice.DocNumber}\nCustomer: ${maybeInvoice.CustomerRef?.name}\nTotal Amount: $${maybeInvoice.TotalAmt}\nBalance: $${maybeInvoice.Balance}`,
-                        },
-                      ]);
+                      streamMessage(
+                        `✅ Tool was called successfully: *Invoice Extractor*\n\nInvoice Details:\nID: ${maybeInvoice.Id}\nDocument Number: ${maybeInvoice.DocNumber}\nCustomer: ${maybeInvoice.CustomerRef?.name}\nTotal Amount: $${maybeInvoice.TotalAmt}\nBalance: $${maybeInvoice.Balance}`
+                      );
                     }
                     return;
                   }
@@ -123,52 +210,46 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoices }) => {
                 }
               }
             }
-          } catch (err) {
-            console.log('Chunk parse failed, waiting for more data...', err);
+          } catch {
+            // Ignore parse errors, wait for more data
           }
         }
       }
 
+      // When stream is done, finalize the streaming message
+      setMessages((msgs) => {
+        // Find the last assistant message with streaming: true
+        const idx = msgs.findIndex(
+          (m, i) => m.role === 'assistant' && m.streaming && i === msgs.length - 1
+        );
+        if (idx !== -1) {
+          const updated = [...msgs];
+          updated[idx] = { ...updated[idx], content: assistantMsg, streaming: false };
+          return updated;
+        }
+        return msgs;
+      });
+      scrollToBottom();
+
+      // If no tool result was handled, show fallback messages as a stream
       if (!toolResultHandled) {
         // Check if the input contains an invoice number pattern
         const invoiceNumberMatch = input.match(/invoice\s+(\d+)/i);
         if (invoiceNumberMatch) {
-          setMessages((msgs) => [
-            ...msgs,
-            {
-              role: 'assistant',
-              content: `❌ Invoice ${invoiceNumberMatch[1]} was not found. Please check the invoice number and try again.`,
-            },
-          ]);
+          streamMessage(`❌ Invoice ${invoiceNumberMatch[1]} was not found. Please check the invoice number and try again.`);
         } else if (toolWasUsed) {
-          setMessages((msgs) => [
-            ...msgs,
-            {
-              role: 'assistant',
-              content: 'ℹ️ The tool was used, but no matching invoice was found. Please check the invoice number and try again.',
-            },
-          ]);
+          streamMessage('ℹ️ The tool was used, but no matching invoice was found. Please check the invoice number and try again.');
         } else {
-          setMessages((msgs) => [
-            ...msgs,
-            {
-              role: 'assistant',
-              content: 'Either the tool was not used, or the tool was used but there was some issue with the tool call.',
-            },
-          ]);
+          streamMessage('Either the tool was not used, or the tool was used but there was some issue with the tool call.');
         }
+        scrollToBottom();
       }
     } catch (err) {
       console.error('Error in chat:', err);
-      setMessages((msgs) => [
-        ...msgs,
-        { role: 'assistant', content: '❌ Error: Could not get response.' },
-      ]);
+      streamMessage('❌ Error: Could not get response.');
+      scrollToBottom();
     } finally {
       setLoading(false);
-      setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-      }, 100);
     }
   };
 
@@ -190,8 +271,10 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ onInvoices }) => {
                   ? 'inline-block bg-blue-100 text-blue-800 rounded px-3 py-1 my-1'
                   : 'inline-block bg-gray-100 text-gray-800 rounded px-3 py-1 my-1'
               }
+              style={msg.streaming ? { opacity: 0.7, fontStyle: 'italic' } : {}}
             >
               {msg.content}
+              {/* Remove the cursor/pulse indicator */}
             </span>
           </div>
         ))}
