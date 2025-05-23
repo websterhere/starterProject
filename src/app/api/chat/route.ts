@@ -12,6 +12,7 @@ export async function POST(req: Request) {
     model: openai('gpt-4'),
     messages,
     tools: { getInvoiceByIdFromApi, getTop5InvoicesFromApi, getInvoicesByCustomerNameFromApi, sendInvoicePdfFromApi },
+  maxSteps: 5,
     toolChoice: 'auto',
   });
 
